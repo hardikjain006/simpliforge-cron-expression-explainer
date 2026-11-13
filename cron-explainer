@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Cron-expression explainer: explain a 5-field cron expression."""
+import re
+import sys
+
+ASCII_WS = ' \t\n\r\x0b\x0c'
+
+MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+DOW_NAMES = [
+    "Sunday", "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday",
+]
+
+FIELD_SPECS = [
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day-of-month", 1, 31),
+    ("month", 1, 12),
+    ("day-of-week", 0, 7),
+]
+
+HELP_TEXT = """Usage:
+  ./cron-explainer EXPRESSION
+  ./cron-explainer --help
+
+Explain a standard 5-field cron expression in plain English.
+
+Forms:
+  ./cron-explainer EXPRESSION   Explain EXPRESSION as one quoted argument
+  ./cron-explainer --help       Print this help text
+
+Field order: MINUTE HOUR DAY-OF-MONTH MONTH DAY-OF-WEEK
+Allowed ranges:
+  minute: 0-59
+  hour: 0-23
+  day-of-month: 1-31
+  month: 1-12
+  day-of-week: 0-7 (0 and 7 both mean Sunday)
+
+Per-field syntax (comma-separated list of items):
+  *        all values
+  */n      every nth value
+  a-b      inclusive range
+  a-b/n    every nth value inside an inclusive range
+  a        single value
+Supported characters: * , - /
+Month/day names (e.g. JAN, MON) are NOT accepted.
+
+Example:
+  ./cron-explainer "*/15 9-17 * * 1-5"
+
+Errors:
+  On invalid input the program exits with status 1, prints nothing to
+  stdout, and prints one line starting with "error: " to stderr.
+  Invalid input includes: no arguments, more than one argument, an empty
+  expression, a wrong field count (not exactly 5 fields), an unknown flag,
+  an illegal character or empty list element, an out-of-range value, a zero
+  step, or a reversed range.
+"""
+
+
+def fail(msg):
+    sys.stderr.write("error: " + msg + "\n")
+    sys.exit(1)
+
+
+def parse_field(field, lo, hi, is_dow):
+    if field == "":
+        raise ValueError("empty field")
+    if not re.fullmatch(r"[0-9*,/\-]+", field):
+        raise ValueError("illegal character")
+    items = field.split(",")
+    values = set()
+    for item in items:
+        if item == "":
+            raise ValueError("empty list element")
+        if item == "*":
+            if is_dow:
+                for v in range(0, 7):
+                    values.add(v)
+            else:
+                for v in range(lo, hi + 1):
+                    values.add(v)
+            continue
+        if item.startswith("*/"):
+            m = re.fullmatch(r"\*/([0-9]+)", item)
+            if not m:
+                raise ValueError("invalid step syntax")
+            n = int(m.group(1))
+            if n < 1:
+                raise ValueError("zero step")
+            if is_dow:
+                for v in range(0, 7, n):
+                    values.add(v)
+            else:
+                for v in range(lo, hi + 1, n):
+                    values.add(v)
+            continue
+        if "/" in item:
+            m = re.fullmatch(r"([0-9]+)-([0-9]+)/([0-9]+)", item)
+            if not m:
+                raise ValueError("invalid step syntax")
+            a = int(m.group(1))
+            b = int(m.group(2))
+            n = int(m.group(3))
+            if n < 1:
+                raise ValueError("zero step")
+            if is_dow:
+                if not (0 <= a <= 7) or not (0 <= b <= 7):
+                    raise ValueError("out-of-range value")
+            else:
+                if not (lo <= a <= hi) or not (lo <= b <= hi):
+                    raise ValueError("out-of-range value")
+            if a > b:
+                raise ValueError("reversed range")
+            for v in range(a, b + 1, n):
+                if is_dow and v == 7:
+                    values.add(0)
+                else:
+                    values.add(v)
+            continue
+        if "-" in item:
+            m = re.fullmatch(r"([0-9]+)-([0-9]+)", item)
+            if not m:
+                raise ValueError("invalid range syntax")
+            a = int(m.group(1))
+            b = int(m.group(2))
+            if is_dow:
+                if not (0 <= a <= 7) or not (0 <= b <= 7):
+                    raise ValueError("out-of-range value")
+            else:
+                if not (lo <= a <= hi) or not (lo <= b <= hi):
+                    raise ValueError("out-of-range value")
+            if a > b:
+                raise ValueError("reversed range")
+            for v in range(a, b + 1):
+                if is_dow and v == 7:
+                    values.add(0)
+                else:
+                    values.add(v)
+            continue
+        m = re.fullmatch(r"([0-9]+)", item)
+        if not m:
+            raise ValueError("invalid syntax")
+        v = int(m.group(1))
+        if is_dow:
+            if not (0 <= v <= 7):
+                raise ValueError("out-of-range value")
+            if v == 7:
+                values.add(0)
+            else:
+                values.add(v)
+        else:
+            if not (lo <= v <= hi):
+                raise ValueError("out-of-range value")
+            values.add(v)
+    return sorted(values)
+
+
+def format_num_list(vals):
+    strs = [str(v) for v in vals]
+    if len(strs) == 1:
+        return strs[0]
+    if len(strs) == 2:
+        return strs[0] + " and " + strs[1]
+    return ", ".join(strs[:-1]) + " and " + strs[-1]
+
+
+def format_name_list(names):
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return names[0] + " and " + names[1]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def is_contiguous(vals):
+    return len(vals) > 1 and vals[-1] - vals[0] + 1 == len(vals)
+
+
+def describe_minute(vals):
+    if vals == list(range(0, 60)):
+        return "every minute"
+    if len(vals) == 1:
+        return "at minute " + str(vals[0])
+    if is_contiguous(vals):
+        return "every minute from " + str(vals[0]) + " through " + str(vals[-1])
+    return "at minutes " + format_num_list(vals)
+
+
+def describe_hour(vals):
+    if vals == list(range(0, 24)):
+        return "every hour"
+    if len(vals) == 1:
+        return "at hour " + str(vals[0])
+    if is_contiguous(vals):
+        return "every hour from " + str(vals[0]) + " through " + str(vals[-1])
+    return "at hours " + format_num_list(vals)
+
+
+def describe_dom(vals):
+    if vals == list(range(1, 32)):
+        return "every day"
+    if len(vals) == 1:
+        return "on day " + str(vals[0])
+    if is_contiguous(vals):
+        return "on days " + str(vals[0]) + " through " + str(vals[-1])
+    return "on days " + format_num_list(vals)
+
+
+def describe_month(vals):
+    if vals == list(range(1, 13)):
+        return "every month"
+    names = [MONTH_NAMES[v - 1] for v in vals]
+    if len(vals) == 1:
+        return "in " + names[0]
+    if is_contiguous(vals):
+        return "in " + names[0] + " through " + names[-1]
+    return "in " + format_name_list(names)
+
+
+def describe_dow(vals):
+    if vals == list(range(0, 7)):
+        return "every day of the week"
+    names = [DOW_NAMES[v] for v in vals]
+    if len(vals) == 1:
+        return "on " + names[0]
+    if is_contiguous(vals):
+        return "on " + names[0] + " through " + names[-1]
+    return "on " + format_name_list(names)
+
+
+def canonicalize(raw):
+    stripped = raw.strip(ASCII_WS)
+    parts = re.split(r"[ \t]+", stripped)
+    return " ".join(parts), parts
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] == "--help":
+        sys.stdout.write(HELP_TEXT)
+        return 0
+    if len(argv) < 2:
+        fail("no expression provided")
+    if len(argv) > 2:
+        fail("too many arguments")
+    raw = argv[1]
+    if raw.strip(ASCII_WS) == "":
+        fail("empty expression")
+    canonical, parts = canonicalize(raw)
+    if canonical == "":
+        fail("empty expression")
+    if len(parts) != 5:
+        fail("wrong field count: expected 5 fields")
+    try:
+        minute_vals = parse_field(parts[0], 0, 59, False)
+        hour_vals = parse_field(parts[1], 0, 23, False)
+        dom_vals = parse_field(parts[2], 1, 31, False)
+        month_vals = parse_field(parts[3], 1, 12, False)
+        dow_vals = parse_field(parts[4], 0, 7, True)
+    except ValueError as e:
+        fail(str(e))
+    lines = [
+        "Schedule: " + canonical,
+        "Minute: " + describe_minute(minute_vals),
+        "Hour: " + describe_hour(hour_vals),
+        "Day of month: " + describe_dom(dom_vals),
+        "Month: " + describe_month(month_vals),
+        "Day of week: " + describe_dow(dow_vals),
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
